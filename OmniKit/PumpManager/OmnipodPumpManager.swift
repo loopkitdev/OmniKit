@@ -92,7 +92,7 @@ extension OmnipodPumpManagerError: LocalizedError {
 
 public class OmnipodPumpManager: RileyLinkPumpManager {
     
-    public static let pluginIdentifier: String = "Omnipod"
+    public let pluginIdentifier: String = "Omnipod"
     
     public let localizedTitle = LocalizedString("Omnipod", comment: "Generic title of the omnipod pump manager")
     
@@ -274,11 +274,11 @@ public class OmnipodPumpManager: RileyLinkPumpManager {
             self.setState { state in
                 state.lastRileyLinkBatteryAlertDate = Date()
             }
-            self.pumpDelegate.notify { delegate in
+            Task {
                 let identifier = Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: "lowRLBattery")
                 let alertBody = String(format: LocalizedString("\"%1$@\" has a low battery", comment: "Format string for low battery alert body for RileyLink. (1: device name)"), device.name ?? "unnamed")
                 let content = Alert.Content(title: LocalizedString("Low RileyLink Battery", comment: "Title for RileyLink low battery alert"), body: alertBody, acknowledgeActionButtonLabel: LocalizedString("OK", comment: "Acknowledge button label for RileyLink low battery alert"))
-                delegate?.issueAlert(Alert(identifier: identifier, foregroundContent: content, backgroundContent: content, trigger: .immediate))
+                await self.pumpDelegate.delegate?.issueAlert(Alert(identifier: identifier, foregroundContent: content, backgroundContent: content, trigger: .immediate))
             }
         }
     }
@@ -374,7 +374,7 @@ extension OmnipodPumpManager {
                     localizedMessage: LocalizedString("Insulin Suspended", comment: "Status highlight that insulin delivery was suspended."),
                     imageName: "pause.circle.fill",
                     state: .warning)
-            } else if date.timeIntervalSince(state.lastPumpDataReportDate ?? .distantPast) > .minutes(12) {
+            } else if isSignalLost(at: date) {
                 return PumpStatusHighlight(
                     localizedMessage: LocalizedString("Signal Loss", comment: "Status highlight when communications with the pod haven't happened recently."),
                     imageName: "exclamationmark.circle.fill",
@@ -387,6 +387,10 @@ extension OmnipodPumpManager {
             }
             return nil
         }
+    }
+    
+    private func isSignalLost(at date: Date = Date()) -> Bool {
+        date.timeIntervalSince(state.lastPumpDataReportDate ?? .distantPast) > .minutes(12)
     }
 
     public func isRunningManualTempBasal(for state: OmnipodPumpManagerState) -> Bool {
@@ -487,6 +491,13 @@ extension OmnipodPumpManager {
         // Treat a non-active (faulted or setup incomplete) pod just like no pod
         guard let podState = state.podState, podState.isActive else {
             return .active(.distantPast)
+        }
+
+        switch podCommState(for: state) {
+        case .fault:
+            return .pumpInoperable
+        default:
+            break
         }
 
         switch state.suspendEngageState {
@@ -1549,6 +1560,14 @@ extension OmnipodPumpManager {
 
 // MARK: - PumpManager
 extension OmnipodPumpManager: PumpManager {
+    public var inSignalLoss: Bool {
+        isSignalLost()
+    }
+    
+    public var isInoperable: Bool {
+        basalDeliveryState(for: state) == .pumpInoperable
+    }
+    
     public static var onboardingMaximumBasalScheduleEntryCount: Int {
         return Pod.maximumBasalScheduleEntryCount
     }
@@ -1825,9 +1844,9 @@ extension OmnipodPumpManager: PumpManager {
     }
 
     fileprivate func clearSuspendReminder() {
-        self.pumpDelegate.notify { (delegate) in
-            delegate?.retractAlert(identifier: Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: PumpManagerAlert.suspendEnded(triggeringSlot: nil).alertIdentifier))
-            delegate?.retractAlert(identifier: Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: PumpManagerAlert.suspendEnded(triggeringSlot: nil).repeatingAlertIdentifier))
+        Task {
+            await self.pumpDelegate.delegate?.retractAlert(identifier: Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: PumpManagerAlert.suspendEnded(triggeringSlot: nil).alertIdentifier))
+            await self.pumpDelegate.delegate?.retractAlert(identifier: Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: PumpManagerAlert.suspendEnded(triggeringSlot: nil).repeatingAlertIdentifier))
         }
     }
 
@@ -1879,7 +1898,7 @@ extension OmnipodPumpManager: PumpManager {
         }
     }
 
-    public func enactBolus(units: Double, activationType: BolusActivationType, completion: @escaping (PumpManagerError?) -> Void) {
+    public func enactBolus(decisionId: UUID?, units: Double, activationType: BolusActivationType, completion: @escaping (PumpManagerError?) -> Void) {
         guard self.hasActivePod else {
             completion(.configuration(OmnipodPumpManagerError.noPodPaired))
             return
@@ -1933,7 +1952,7 @@ extension OmnipodPumpManager: PumpManager {
             // Use a maximum programReminderInterval value of 0x3F to denote an automatic bolus in the communication log
             let programReminderInterval: TimeInterval = activationType.isAutomatic ? TimeInterval(minutes: 0x3F) : 0
 
-            let result = session.bolus(units: enactUnits, automatic: activationType.isAutomatic, acknowledgementBeep: acknowledgementBeep, completionBeep: completionBeep, programReminderInterval: programReminderInterval)
+            let result = session.bolus(decisionId: decisionId, units: enactUnits, automatic: activationType.isAutomatic, acknowledgementBeep: acknowledgementBeep, completionBeep: completionBeep, programReminderInterval: programReminderInterval)
 
             switch result {
             case .success:
@@ -2016,11 +2035,11 @@ extension OmnipodPumpManager: PumpManager {
         }
     }
 
-    public func enactTempBasal(unitsPerHour: Double, for duration: TimeInterval, completion: @escaping (PumpManagerError?) -> Void) {
-        runTemporaryBasalProgram(unitsPerHour: unitsPerHour, for: duration, automatic: true, completion: completion)
+    public func enactTempBasal(decisionId: UUID?, unitsPerHour: Double, for duration: TimeInterval, completion: @escaping (PumpManagerError?) -> Void) {
+        runTemporaryBasalProgram(decisionId: decisionId, unitsPerHour: unitsPerHour, for: duration, automatic: true, completion: completion)
     }
 
-    public func runTemporaryBasalProgram(unitsPerHour: Double, for duration: TimeInterval, automatic: Bool, completion: @escaping (PumpManagerError?) -> Void) {
+    public func runTemporaryBasalProgram(decisionId: UUID?, unitsPerHour: Double, for duration: TimeInterval, automatic: Bool, completion: @escaping (PumpManagerError?) -> Void) {
 
         guard self.hasActivePod else {
             completion(.configuration(OmnipodPumpManagerError.noPodPaired))
@@ -2147,7 +2166,7 @@ extension OmnipodPumpManager: PumpManager {
                 let scheduledRate = self.state.basalSchedule.currentRate(using: calendar, at: self.dateGenerator())
                 let isHighTemp = rate > scheduledRate
 
-                let result = session.setTempBasal(rate: rate, duration: duration, isHighTemp: isHighTemp, automatic: automatic, acknowledgementBeep: acknowledgementBeep, completionBeep: completionBeep)
+                let result = session.setTempBasal(decisionId: decisionId, rate: rate, duration: duration, isHighTemp: isHighTemp, automatic: automatic, acknowledgementBeep: acknowledgementBeep, completionBeep: completionBeep)
                 switch result {
                 case .success:
                     session.dosesForStorage() { (doses) -> Bool in
@@ -2340,16 +2359,16 @@ extension OmnipodPumpManager: PumpManager {
     func issueAlert(alert: PumpManagerAlert) {
         let identifier = Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: alert.alertIdentifier)
         let loopAlert = Alert(identifier: identifier, foregroundContent: alert.foregroundContent, backgroundContent: alert.backgroundContent, trigger: .immediate)
-        pumpDelegate.notify { (delegate) in
-            delegate?.issueAlert(loopAlert)
+        Task {
+            await self.pumpDelegate.delegate?.issueAlert(loopAlert)
         }
 
         if let repeatInterval = alert.repeatInterval {
             // Schedule an additional repeating 15 minute reminder for suspend period ended.
             let repeatingIdentifier = Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: alert.repeatingAlertIdentifier)
             let loopAlert = Alert(identifier: repeatingIdentifier, foregroundContent: alert.foregroundContent, backgroundContent: alert.backgroundContent, trigger: .repeating(repeatInterval: repeatInterval))
-            pumpDelegate.notify { (delegate) in
-                delegate?.issueAlert(loopAlert)
+            Task {
+                await self.pumpDelegate.delegate?.issueAlert(loopAlert)
             }
         }
 
@@ -2360,13 +2379,13 @@ extension OmnipodPumpManager: PumpManager {
 
     func retractAlert(alert: PumpManagerAlert) {
         let identifier = Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: alert.alertIdentifier)
-        pumpDelegate.notify { (delegate) in
-            delegate?.retractAlert(identifier: identifier)
+        Task {
+            await self.pumpDelegate.delegate?.retractAlert(identifier: identifier)
         }
         if alert.isRepeating {
             let repeatingIdentifier = Alert.Identifier(managerIdentifier: self.pluginIdentifier, alertIdentifier: alert.repeatingAlertIdentifier)
-            pumpDelegate.notify { (delegate) in
-                delegate?.retractAlert(identifier: repeatingIdentifier)
+            Task {
+                await self.pumpDelegate.delegate?.retractAlert(identifier: repeatingIdentifier)
             }
         }
         self.setState { (state) in
@@ -2450,11 +2469,11 @@ extension OmnipodPumpManager: PumpManager {
     static let podAlarmNotificationIdentifier = "Omnipod:\(LoopNotificationCategory.pumpFault.rawValue)"
 
     private func notifyPodFault(fault: DetailedStatus) {
-        pumpDelegate.notify { delegate in
+        Task {
             let content = Alert.Content(title: fault.faultEventCode.notificationTitle,
                                         body: fault.faultEventCode.notificationBody,
                                         acknowledgeActionButtonLabel: LocalizedString("OK", comment: "Alert acknowledgment OK button"))
-            delegate?.issueAlert(Alert(identifier: Alert.Identifier(managerIdentifier: OmnipodPumpManager.podAlarmNotificationIdentifier,
+            await self.pumpDelegate.delegate?.issueAlert(Alert(identifier: Alert.Identifier(managerIdentifier: OmnipodPumpManager.podAlarmNotificationIdentifier,
                                                                     alertIdentifier: fault.faultEventCode.description),
                                        foregroundContent: content, backgroundContent: content,
                                        trigger: .immediate))
@@ -2566,11 +2585,9 @@ extension OmnipodPumpManager: PodCommsDelegate {
 
 // MARK: - AlertResponder implementation
 extension OmnipodPumpManager {
-    public func acknowledgeAlert(alertIdentifier: Alert.AlertIdentifier, completion: @escaping (Error?) -> Void) {
-        guard self.hasActivePod, !state.activeAlerts.isEmpty else {
-            log.default("Skipping acknowledge alert %{public}@ with no active pod or alerts", alertIdentifier)
-            completion(nil)
-            return
+    public func acknowledgeAlert(alertIdentifier: LoopKit.Alert.AlertIdentifier) async throws {
+        guard self.hasActivePod else {
+            throw OmnipodPumpManagerError.noPodPaired
         }
 
         var found = false
@@ -2592,28 +2609,29 @@ extension OmnipodPumpManager {
 
                     // Acknowledge the pod alert for the triggering slot
                     let rileyLinkSelector = self.rileyLinkDeviceProvider.firstConnectedDevice
-                    self.podComms.runSession(withName: "Acknowledge Alert", using: rileyLinkSelector) { (result) in
-                        switch result {
-                        case .success(let session):
-                            do {
-                                let beepBlock = self.beepMessageBlock(beepType: .beep)
-                                let _ = try session.acknowledgeAlerts(alerts: AlertSet(slots: [slot]), beepBlock: beepBlock)
-                            } catch {
-                                self.setState { state in
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) -> Void in
+                        self.podComms.runSession(withName: "Acknowledge Alert", using: rileyLinkSelector) { (result) in
+                            switch result {
+                            case .success(let session):
+                                do {
+                                    let beepBlock = self.beepMessageBlock(beepType: .beep)
+                                    let _ = try session.acknowledgeAlerts(alerts: AlertSet(slots: [slot]), beepBlock: beepBlock)
+                                } catch {
+                                    self.mutateState { state in
+                                        state.alertsWithPendingAcknowledgment.insert(alert)
+                                    }
+                                    continuation.resume(throwing: error)
+                                }
+                                self.mutateState { state in
+                                    state.activeAlerts.remove(alert)
+                                }
+                                continuation.resume()
+                            case .failure(let error):
+                                self.mutateState { state in
                                     state.alertsWithPendingAcknowledgment.insert(alert)
                                 }
-                                completion(error)
-                                return
+                                continuation.resume(throwing: error)
                             }
-                            self.setState { state in
-                                state.activeAlerts.remove(alert)
-                            }
-                            completion(nil)
-                        case .failure(let error):
-                            self.setState { state in
-                                state.alertsWithPendingAcknowledgment.insert(alert)
-                            }
-                            completion(error)
                         }
                     }
                 } else {
@@ -2624,14 +2642,13 @@ extension OmnipodPumpManager {
                             state.acknowledgedTimeOffsetAlert = true
                         }
                     }
-                    completion(nil)
                 }
             }
         }
 
         if !found {
             log.error("acknowledge alert %{public}@ not found!", alertIdentifier)
-            completion(nil)
+            // alert not found — no-op in async version
         }
     }
 }

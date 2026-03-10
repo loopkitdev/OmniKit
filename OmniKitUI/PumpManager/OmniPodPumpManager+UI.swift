@@ -67,7 +67,7 @@ public enum OmniKitStatusBadge: DeviceStatusBadge {
 
 // MARK: - PumpStatusIndicator
 extension OmnipodPumpManager {
-    public var pumpStatusHighlight: DeviceStatusHighlight? {
+    public var pumpStatusHighlight: PumpStatusHighlight? {
         buildPumpStatusHighlight(for: state)
     }
     
