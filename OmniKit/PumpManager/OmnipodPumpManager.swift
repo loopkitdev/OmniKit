@@ -374,7 +374,7 @@ extension OmnipodPumpManager {
                     localizedMessage: LocalizedString("Insulin Suspended", comment: "Status highlight that insulin delivery was suspended."),
                     imageName: "pause.circle.fill",
                     state: .warning)
-            } else if isSignalLost(at: date) {
+            } else if isSignalLost(at: date, lastPumpDataReportDate: state.lastPumpDataReportDate) {
                 return PumpStatusHighlight(
                     localizedMessage: LocalizedString("Signal Loss", comment: "Status highlight when communications with the pod haven't happened recently."),
                     imageName: "exclamationmark.circle.fill",
@@ -389,8 +389,8 @@ extension OmnipodPumpManager {
         }
     }
     
-    private func isSignalLost(at date: Date = Date()) -> Bool {
-        date.timeIntervalSince(state.lastPumpDataReportDate ?? .distantPast) > .minutes(12)
+    private func isSignalLost(at date: Date, lastPumpDataReportDate: Date?) -> Bool {
+        date.timeIntervalSince(lastPumpDataReportDate ?? .distantPast) > .minutes(12)
     }
 
     public func isRunningManualTempBasal(for state: OmnipodPumpManagerState) -> Bool {
@@ -1561,7 +1561,7 @@ extension OmnipodPumpManager {
 // MARK: - PumpManager
 extension OmnipodPumpManager: PumpManager {
     public var inSignalLoss: Bool {
-        isSignalLost()
+        isSignalLost(at: Date(), lastPumpDataReportDate: state.lastPumpDataReportDate)
     }
     
     public var isInoperable: Bool {
