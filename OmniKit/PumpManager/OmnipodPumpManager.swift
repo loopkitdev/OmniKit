@@ -2616,17 +2616,17 @@ extension OmnipodPumpManager {
                                     let beepBlock = self.beepMessageBlock(beepType: .beep)
                                     let _ = try session.acknowledgeAlerts(alerts: AlertSet(slots: [slot]), beepBlock: beepBlock)
                                 } catch {
-                                    self.setState { state in
+                                    self.mutateState { state in
                                         state.alertsWithPendingAcknowledgment.insert(alert)
                                     }
                                     continuation.resume(throwing: error)
                                 }
-                                self.setState { state in
+                                self.mutateState { state in
                                     state.activeAlerts.remove(alert)
                                 }
                                 continuation.resume()
                             case .failure(let error):
-                                self.setState { state in
+                                self.mutateState { state in
                                     state.alertsWithPendingAcknowledgment.insert(alert)
                                 }
                                 continuation.resume(throwing: error)
